@@ -68,6 +68,37 @@ describe('aggregateSamples', () => {
     expect(out.turns).toBe(0)
   })
 
+  it('counts the tokens of a sample that is both a request and usage', () => {
+    // `compaction/summary` states the call AND its provider usage in ONE
+    // sample; the request count and the buckets are independent facts.
+    const out = aggregateSamples(
+      [sample({ day: '2026-08-01', model: 'deepseek/deepseek-flash', inputTokens: 376, outputTokens: 3163, cacheReadTokens: 314184, request: true })],
+      { from: '2026-08-01', to: '2026-08-01' },
+    )
+    expect(out.requests).toBe(1)
+    expect(out.tokens).toBe(317723) // 376 + 3163 + 314184
+    expect(out.cacheHit).toBe(314184)
+    expect(out.cacheMiss).toBe(376)
+    expect(out.activeDays).toBe(1)
+    expect(out.models).toHaveLength(1)
+  })
+
+  it('keeps a token-free request marker out of the model rows and active days', () => {
+    const out = aggregateSamples(
+      [
+        sample({ day: '2026-08-01', model: 'deepseek/deepseek-flash', inputTokens: 10, outputTokens: 1 }),
+        sample({ day: '2026-08-02', model: 'deepseek/deepseek-chat', request: true }),
+      ],
+      { from: '2026-08-01', to: '2026-08-02' },
+    )
+    expect(out.requests).toBe(1)
+    expect(out.tokens).toBe(11)
+    // The marker-only day carries the request but is not an active day, and
+    // marker-only rows never appear in the model ranking.
+    expect(out.activeDays).toBe(1)
+    expect(out.models.map((m) => m.model)).toEqual(['deepseek/deepseek-flash'])
+  })
+
   it('keeps the hit-rate denominators disjoint from the inclusive headline', () => {
     const out = aggregateSamples(
       [sample({ day: '2026-08-01', model: 'm', inputTokens: 100, outputTokens: 50, cacheReadTokens: 4000, cacheWriteTokens: 20 })],

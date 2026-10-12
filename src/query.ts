@@ -94,20 +94,22 @@ export function aggregateSamples(samples: Iterable<UsageSample>, filter: RangeFi
       dayTurns.set(sample.day, (dayTurns.get(sample.day) ?? 0) + 1)
       continue
     }
-    if (sample.request) {
-      // One provider call, whether or not it produced tokens — reasonix counts
-      // failed calls too. At THIS layer a sample is either a request marker or
-      // a token sample, never both: aggregateRange expands a stored row's
-      // `requests` count and its token buckets into separate samples, so the
-      // two can never double-count each other.
-      out.requests++
-      dayRequests.set(sample.day, (dayRequests.get(sample.day) ?? 0) + 1)
-      continue
-    }
     // Provider-inclusive headline (dashboard parity): every bucket the
     // provider billed for this call — uncached input, output, cache reads
     // and writes. The hit/miss rate denominators below stay input-side only.
     const total = sample.inputTokens + sample.outputTokens + sample.cacheReadTokens + sample.cacheWriteTokens
+    if (sample.request) {
+      // One provider call, whether or not it produced tokens — reasonix counts
+      // failed calls too. A marker with no buckets is a request and nothing
+      // else: it must not create a model row, mark its day active, or open an
+      // empty daily bucket. A marker that DOES carry buckets
+      // (`compaction/summary` states the call and its usage in one sample) is
+      // counted here and again through the token accounting below — the two
+      // count different things, so neither doubles the other.
+      out.requests++
+      dayRequests.set(sample.day, (dayRequests.get(sample.day) ?? 0) + 1)
+      if (total <= 0) continue
+    }
     out.tokens += total
     out.cacheHit += sample.cacheReadTokens
     // The miss side is everything prompt-side that was NOT a cache read:

@@ -96,6 +96,24 @@ interface LlmStreamChunk {
   usage?: UsageEventData['usage']
 }
 
+/**
+ * The host events this collector subscribes to, each with its own listener
+ * signature. `session/event` and `session/disposed` are plain notifications;
+ * `llm/stream` is a cordis waterfall, so its listener receives the call's
+ * options plus the downstream `next` and returns the (possibly wrapped) chunk
+ * stream. Declaring the signatures per event keeps the event name and the
+ * listener shape checked together, instead of asserting the listener away.
+ */
+interface CollectorContext {
+  on?(event: 'session/event', listener: (session: { id: string }, event: UsageSessionEvent) => void): void
+  on?(event: 'session/disposed', listener: (session: { id: string }) => void): void
+  on?(
+    event: 'llm/stream',
+    listener: (options: LlmStreamOptions, next: () => AsyncIterable<LlmStreamChunk>) => AsyncIterable<LlmStreamChunk>,
+  ): void
+  logger?: { warn(message: unknown): void }
+}
+
 export interface CollectorOptions {
   /** The source label recorded with every sample (matches the reasonix Source). */
   source?: string
@@ -395,10 +413,7 @@ export class UsageCollector {
   start(): void {
     if (this.started) return
     this.started = true
-    const ctx = this.ctx as unknown as {
-      on?: (event: string, listener: (...args: never[]) => void) => void
-      logger?: { warn(message: unknown): void }
-    }
+    const ctx = this.ctx as unknown as CollectorContext
     if (typeof ctx.on !== 'function') {
       // A cordis Context always has `on`; the optional chaining below is
       // defensive. If it is ever missing, the LIVE path would die silently
@@ -453,8 +468,8 @@ export class UsageCollector {
     // waterfall is therefore the only place that usage is observable — and
     // because it is not in the log, it cannot be backfilled: a title call that
     // happens while this plugin is not running is lost for good.
-    ctx.on?.('llm/stream', ((options: LlmStreamOptions, next: () => AsyncIterable<LlmStreamChunk>) =>
-      this.observeAuxiliaryCall(options, next)) as never)
+    ctx.on?.('llm/stream', (options: LlmStreamOptions, next: () => AsyncIterable<LlmStreamChunk>) =>
+      this.observeAuxiliaryCall(options, next))
   }
 
   /**

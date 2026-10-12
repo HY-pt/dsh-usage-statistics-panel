@@ -817,7 +817,7 @@ describe('UsageCollector auxiliary calls (llm/stream)', () => {
     } as unknown as ConstructorParameters<typeof UsageCollector>[1] & { recorded: Array<Record<string, unknown>> }
   }
 
-  it('records a session-title call as its last usage sample plus one request', async () => {
+  it('records a session-title call as one sample with its last usage and request', async () => {
     const { ctx, listeners } = captureCtx()
     const store = recordingStore()
     const collector = new UsageCollector(ctx as never, store as never)
@@ -832,16 +832,15 @@ describe('UsageCollector auxiliary calls (llm/stream)', () => {
     // The wrapper must forward the stream untouched.
     expect(out).toEqual(chunks)
 
-    const tokens = store.recorded.find((s) => s.request !== true)
-    const request = store.recorded.find((s) => s.request === true)
-    expect(store.recorded).toHaveLength(2)
+    expect(store.recorded).toHaveLength(1)
+    const sample = store.recorded[0]!
     // The LAST usage sample wins: adapters emit cumulative samples.
-    expect(tokens?.inputTokens).toBe(300)
-    expect(tokens?.outputTokens).toBe(20)
-    expect(tokens?.cacheReadTokens).toBe(5)
-    expect(tokens?.model).toBe('deepseek/deepseek-flash')
-    expect(request?.model).toBe('deepseek/deepseek-flash')
-    expect(request?.inputTokens).toBe(0)
+    expect(sample.inputTokens).toBe(300)
+    expect(sample.outputTokens).toBe(20)
+    expect(sample.cacheReadTokens).toBe(5)
+    expect(sample.model).toBe('deepseek/deepseek-flash')
+    // The same sample counts the one provider call it reports.
+    expect(sample.request).toBe(true)
   })
 
   it('leaves every other purpose untouched', async () => {

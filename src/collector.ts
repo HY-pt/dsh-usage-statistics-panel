@@ -482,13 +482,13 @@ export class UsageCollector {
 
   /**
    * Forward a title generation's stream while observing its usage, then
-   * record the settled call as TWO samples: its tokens and a request marker.
+   * record the settled call as ONE sample carrying both its tokens and the
+   * request marker.
    *
-   * Splitting them keeps the store's request semantics untouched — a
-   * token-free marker already counts one request, and a token sample never
-   * does — which is what makes this half of the accounting independent of the
-   * compaction path. The two samples share a day and model, so they land on
-   * the same row.
+   * One sample, not two: the store's marker is orthogonal to its buckets, so
+   * a single write states "this call happened and reported these tokens" —
+   * the same shape the compaction path stores, and one write instead of two
+   * against the same row.
    */
   private async *recordTitleCall(
     stream: AsyncIterable<LlmStreamChunk>,
@@ -502,23 +502,18 @@ export class UsageCollector {
       if (chunk?.type === 'usage' && chunk.usage !== undefined) usage = chunk.usage
       yield chunk
     }
-    const record = (sample: UsageSample): void => {
-      // Same observational contract as every other record: a degraded store
-      // is counted, never allowed to escape as an unhandled rejection.
-      void this.store.record(sample).catch(() => { this.status.recordFailures++ })
-    }
-    if (usage !== undefined) {
-      record({
-        day,
-        model,
-        inputTokens: usage.inputTokens ?? 0,
-        outputTokens: usage.outputTokens ?? 0,
-        cacheReadTokens: usage.cacheReadTokens ?? 0,
-        cacheWriteTokens: usage.cacheWriteTokens ?? 0,
-      })
-    }
-    // The call itself, whether or not it reported tokens: one provider call.
-    record({ day, model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, request: true })
+    // The call is one provider call whether or not it reported tokens. Same
+    // observational contract as every other record: a degraded store is
+    // counted, never allowed to escape as an unhandled rejection.
+    void this.store.record({
+      day,
+      model,
+      inputTokens: usage?.inputTokens ?? 0,
+      outputTokens: usage?.outputTokens ?? 0,
+      cacheReadTokens: usage?.cacheReadTokens ?? 0,
+      cacheWriteTokens: usage?.cacheWriteTokens ?? 0,
+      request: true,
+    }).catch(() => { this.status.recordFailures++ })
   }
 
   /** Whether a backfill is in progress or was completed. */

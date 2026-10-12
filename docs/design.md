@@ -7,9 +7,9 @@ DSH Usage Statistics Panel 复刻 reasonix 的用量统计功能（PR #7238 / #7
 ```
 session 事件流 (session/event)
         │  assistant/message.usage, assistant/chunk(chunk.type=usage)
-        │  request/context (provider/model 归因)
+        │  compaction/summary.usage, request/context (provider/model 归因)
         ▼
-UsageCollector ──(turn,step 去重折叠)──▶ UsageStore (storage-domain)
+UsageCollector ──(turn,step / compactionId 去重折叠)──▶ UsageStore (storage-domain)
         ▲                                       │
         │ 首次启用回扫                        rangeRows(from,to)
         │  sessionPersistence.list() +        ▼
@@ -17,14 +17,18 @@ UsageCollector ──(turn,step 去重折叠)──▶ UsageStore (storage-domai
                                                 │
                                                 ▼
                                     UsageStatsPanel (插件页 + 独立主面板, 手绘 SVG)
+
+llm/stream 瀑布 (purpose='session-title')       ← 不在会话日志中，无法回扫
+        └──(流内观测 usage)──────────────────▶ UsageStore
 ```
 
 ## Host 半
 
 ### collector.ts — 采集与去重
 
-- **实时**：`ctx.on('session/event')` 订阅。`assistant/message` 的 `data.usage`（TokenUsage）与 `assistant/chunk` 的 `chunk.type === 'usage'` 都是 usage 样本；`request/context` 提供 provider/model 归因。fold 桶与归因路由都按回调携带的 sessionId 分桶，并发会话互不干扰；`session/disposed` 时释放对应桶。
-- **去重**：同一会话内同一 `(turn, step)` 只向 store 发射一次（fold 内部保留最新值用于判重）。已发布的两个适配器在流式 chunk 与最终 message 上报告**完全相同**的 TokenUsage（llm-deepseek 在 DONE 时用同一个 `pendingUsage` 对象发一次；llm-pi-ai 仅在 done/error 终态发射），因此"首样本生效"与"取后者"观测等价。若未来适配器对同一次调用报告不同数值，需升级为 store 侧按 `(session, turn, step)` 的差值修正。跨会话的相同 `(turn, step)` 各自成立。
+- **实时**：`ctx.on('session/event')` 订阅。`assistant/message` 的 `data.usage`（TokenUsage）与 `assistant/chunk` 的 `chunk.type === 'usage'` 都是 usage 样本；`compaction/summary` 的 `data.usage` 是同一事件流上的第三类 usage 样本——摘要调用不产生 `assistant/message`，该事件是它唯一的持久记录——并同时计一次请求；`request/context` 提供 provider/model 归因。fold 桶与归因路由都按回调携带的 sessionId 分桶，并发会话互不干扰；`session/disposed` 时释放对应桶。
+- **辅助调用**：`purpose: 'session-title'` 的调用（AI 生成会话标题）经 `ctx.llm.stream()` 发出，在会话日志里只留请求、不留用量，因此由 `llm/stream` 瀑布在流内观测：取流中最后一个 usage 样本加一个请求标记，按调用开始时刻归日、按 `options.provider`/`model` 归因。关闭流（超时或会话取消）时仍记账。其余 purpose 的调用原样透传，热路径不付出代价。
+- **去重**：同一会话内同一 `(turn, step)` 只向 store 发射一次（fold 内部保留最新值用于判重）。已发布的两个适配器在流式 chunk 与最终 message 上报告**完全相同**的 TokenUsage（llm-deepseek 在 DONE 时用同一个 `pendingUsage` 对象发一次；llm-pi-ai 仅在 done/error 终态发射），因此"首样本生效"与"取后者"观测等价。若未来适配器对同一次调用报告不同数值，需升级为 store 侧按 `(session, turn, step)` 的差值修正。跨会话的相同 `(turn, step)` 各自成立。`compaction/summary` 没有 `(turn, step)` 槽位，改按 `compactionId` 去重（宿主以 `randomUUID()` 生成，全局唯一）。
 - **游标**：实时监听把每个触达过的会话 id 合批写入持久化游标（`markSeenSessions`，microtask 合批）。这是重启安全的关键：harness 的 `SessionStore.list()` 只返回内存中活跃的会话，会话释放后其样本只存在于 store 行和持久化日志里——没有游标，下次启动的回扫会把日志重放在已记录的行上，全部翻倍。
 - **回扫**：首次启用时 `sessionPersistence.list()` 枚举全部会话（当前活跃会话除外），`inspect(id)` 读取完整事件日志（zstd 由后端内部处理），并发 4 逐会话回放——每个会话使用全新的独立 fold。单个会话读取失败不中断整体回扫（status.error 记录）；游标按批（32 个/次）串行写回，避免并发读改写丢 id。每个目标重放前复查一次存活状态：快照之后恢复活跃的会话归实时监听所有，跳过重放。
 - **旧库重建**：storage-domain 打开时（store 构造链内）检测"有行但游标为空"的 ≤0.1.1 旧库，一次性清空行让回扫重建——判定发生在任何 record/mark 之前，无顺序竞态。
@@ -39,6 +43,8 @@ UsageCollector ──(turn,step 去重折叠)──▶ UsageStore (storage-domai
 - 后端（web-app bundle 的 storage-json）落地 `$DSH_HOME/storages/usage_history.json`
 
 Token 桶语义：`inputTokens` 是 uncached input（即缓存 miss 侧），`cacheReadTokens` 是缓存命中侧——命中率恒为 `Σhit / Σ(hit+miss)`，与 reasonix 一致，两个分母不混。
+
+请求标记语义：`requests` 与 token 桶正交。`step/start`、`llm/retry-started` 只加 `requests`（调用失败、无 token 也算一次）；`assistant/message` 只加 token 桶（那次调用已由自己的 `step/start` 计过请求）；`compaction/summary` 与标题调用两者都加——它们是 loop 之外的调用，没有 `step/start` 为它们计请求。
 
 ### query.ts — 范围聚合
 

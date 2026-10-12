@@ -31,8 +31,11 @@ export { dayKey, daysInRange, providerOf }
  * One atomic usage sample from a completed model call (or one completed
  * turn). A call sample carries the four token buckets and the model ref; a
  * turn marker carries only the day (the panel's "sessions" metric is one
- * completed turn). A request marker (from `request/context`) counts one
- * provider call with no tokens.
+ * completed turn). The request marker is ORTHOGONAL to the buckets: it counts
+ * one provider call, and it rides alone on a call that reported no tokens
+ * (`step/start`, a started retry) or alongside the buckets when the call
+ * reports its own usage (`compaction/summary` — a call no `step/start`
+ * opened).
  */
 export interface UsageSample {
   day: string // local calendar day the call completed
@@ -42,7 +45,7 @@ export interface UsageSample {
   cacheReadTokens: number
   cacheWriteTokens: number
   turn?: boolean // true for a completed-turn marker
-  request?: boolean // true for a provider-call (request/context) marker
+  request?: boolean // true when this sample also counts one provider call
 }
 
 export interface RangeFilter {
@@ -91,19 +94,22 @@ export function aggregateSamples(samples: Iterable<UsageSample>, filter: RangeFi
       dayTurns.set(sample.day, (dayTurns.get(sample.day) ?? 0) + 1)
       continue
     }
-    if (sample.request) {
-      // A provider call (step/start or a started retry): one request whether
-      // or not it produced tokens — reasonix counts failed calls too. The
-      // request markers are the ONLY request source: a successful call also
-      // yields a usage sample, and counting both would double every call.
-      out.requests++
-      dayRequests.set(sample.day, (dayRequests.get(sample.day) ?? 0) + 1)
-      continue
-    }
     // Provider-inclusive headline (dashboard parity): every bucket the
     // provider billed for this call — uncached input, output, cache reads
     // and writes. The hit/miss rate denominators below stay input-side only.
     const total = sample.inputTokens + sample.outputTokens + sample.cacheReadTokens + sample.cacheWriteTokens
+    if (sample.request) {
+      // One provider call, whether or not it produced tokens — reasonix counts
+      // failed calls too. A marker with no buckets is a request and nothing
+      // else: it must not create a model row, mark its day active, or open an
+      // empty daily bucket. A marker that DOES carry buckets
+      // (`compaction/summary` states the call and its usage in one sample) is
+      // counted here and again through the token accounting below — the two
+      // count different things, so neither doubles the other.
+      out.requests++
+      dayRequests.set(sample.day, (dayRequests.get(sample.day) ?? 0) + 1)
+      if (total <= 0) continue
+    }
     out.tokens += total
     out.cacheHit += sample.cacheReadTokens
     // The miss side is everything prompt-side that was NOT a cache read:

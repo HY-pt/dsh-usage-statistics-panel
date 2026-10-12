@@ -463,10 +463,10 @@ export class UsageCollector {
    * the hot path pays nothing for this subscription; only a `session-title`
    * call gets an observing wrapper.
    *
-   * The wrapper's one rule: record what the call actually reported, once the
-   * stream settles. A stream that throws records nothing — the call never
-   * settled, and a waterfall listener cannot tell a short-circuited call from
-   * a failed one.
+   * The wrapper's one rule: record what the call actually reported. Whether
+   * the stream settles or is abandoned, `next()` has already been invoked, so
+   * the call is one provider call — a timeout or a cancelled session does not
+   * make it unobserved.
    */
   private observeAuxiliaryCall(
     options: LlmStreamOptions,
@@ -496,24 +496,33 @@ export class UsageCollector {
     model: string | undefined,
   ): AsyncIterable<LlmStreamChunk> {
     let usage: UsageEventData['usage'] | undefined
-    for await (const chunk of stream) {
-      // The LAST usage sample wins: adapters emit cumulative samples, and the
-      // assembler's own contract is overwrite (see BlockAssembler.usage).
-      if (chunk?.type === 'usage' && chunk.usage !== undefined) usage = chunk.usage
-      yield chunk
+    try {
+      for await (const chunk of stream) {
+        // The LAST usage sample wins: adapters emit cumulative samples, and the
+        // assembler's own contract is overwrite (see BlockAssembler.usage).
+        if (chunk?.type === 'usage' && chunk.usage !== undefined) usage = chunk.usage
+        yield chunk
+      }
+    } finally {
+      // In a `finally` because a consumer can abandon the stream mid-flight:
+      // session-title-llm checks its fused deadline signal inside its own loop
+      // and throws on a timeout or a cancelled session, which returns this
+      // generator at the suspended `yield` and would otherwise skip the
+      // bookkeeping entirely — silently losing a call the provider already
+      // billed. The call is one provider call whether or not it reported
+      // tokens. Same observational contract as every other record: a degraded
+      // store is counted, never allowed to escape as an unhandled rejection.
+      // A consumer's failure still propagates; nothing here swallows it.
+      void this.store.record({
+        day,
+        model,
+        inputTokens: usage?.inputTokens ?? 0,
+        outputTokens: usage?.outputTokens ?? 0,
+        cacheReadTokens: usage?.cacheReadTokens ?? 0,
+        cacheWriteTokens: usage?.cacheWriteTokens ?? 0,
+        request: true,
+      }).catch(() => { this.status.recordFailures++ })
     }
-    // The call is one provider call whether or not it reported tokens. Same
-    // observational contract as every other record: a degraded store is
-    // counted, never allowed to escape as an unhandled rejection.
-    void this.store.record({
-      day,
-      model,
-      inputTokens: usage?.inputTokens ?? 0,
-      outputTokens: usage?.outputTokens ?? 0,
-      cacheReadTokens: usage?.cacheReadTokens ?? 0,
-      cacheWriteTokens: usage?.cacheWriteTokens ?? 0,
-      request: true,
-    }).catch(() => { this.status.recordFailures++ })
   }
 
   /** Whether a backfill is in progress or was completed. */

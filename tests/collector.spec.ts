@@ -868,4 +868,32 @@ describe('UsageCollector auxiliary calls (llm/stream)', () => {
     expect(store.recorded[0]!.request).toBe(true)
     expect(store.recorded[0]!.model).toBe('deepseek/deepseek-flash')
   })
+
+  it('records a title call whose consumer abandons the stream mid-flight', async () => {
+    // session-title-llm checks its deadline signal inside its own loop and
+    // throws on a timeout or a cancelled session, which returns the wrapper at
+    // its suspended `yield`. The call already reached the provider, so it must
+    // still be counted — with whatever usage it had reported by then.
+    const { ctx, listeners } = captureCtx()
+    const store = recordingStore()
+    const collector = new UsageCollector(ctx as never, store as never)
+    collector.start()
+    const listener = (listeners.get('llm/stream') ?? [])[0] as unknown as (
+      options: Record<string, unknown>,
+      next: () => AsyncIterable<Record<string, unknown>>,
+    ) => AsyncIterable<Record<string, unknown>>
+    const next = () => (async function* () {
+      yield { type: 'usage', usage: { inputTokens: 40, outputTokens: 2 } }
+      yield { type: 'text-delta', text: 'Ti' }
+    })()
+    const stream = listener({ purpose: 'session-title', provider: 'deepseek', model: 'deepseek-flash' }, next)
+    const iterator = stream[Symbol.asyncIterator]()
+    await iterator.next()
+    await iterator.return?.()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(store.recorded).toHaveLength(1)
+    expect(store.recorded[0]!.request).toBe(true)
+    expect(store.recorded[0]!.inputTokens).toBe(40)
+    expect(store.recorded[0]!.model).toBe('deepseek/deepseek-flash')
+  })
 })

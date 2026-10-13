@@ -1,11 +1,12 @@
 /**
  * Trust-fence tests — the /usage/api fence must match the official /api
  * gateway semantics (dsh-client-connection isTrustedApiRequest): Host fence
- * (loopback or trusted authority, port-aware entry matching), the
- * sec-fetch-site cross-site refusal, and the same-origin Origin check.
+ * (loopback, the listener's own bind address, or a trusted authority, with
+ * port-aware entry matching), the sec-fetch-site cross-site refusal, and the
+ * same-origin Origin check.
  */
 import { describe, expect, it } from 'vitest'
-import { createTrustFence, isLoopbackHostname, parseHostHeader } from '../src/trust-fence.ts'
+import { createTrustFence, isLoopbackHostname, parseHostHeader, type TrustInputs } from '../src/trust-fence.ts'
 import type { UsageHttpRequest } from '../src/context-types.ts'
 
 function reqOf(headers: Record<string, string>): UsageHttpRequest {
@@ -35,7 +36,7 @@ describe('parseHostHeader', () => {
 })
 
 describe('createTrustFence', () => {
-  const fence = createTrustFence(() => ['192.168.1.5', 'myhost.example:3080'])
+  const fence = createTrustFence(() => ({ trustedHosts: ['192.168.1.5', 'myhost.example:3080'] }))
 
   it('accepts a loopback Host with port', () => {
     expect(fence.isTrusted(reqOf({ host: '127.0.0.1:3080' }))).toBe(true)
@@ -70,5 +71,58 @@ describe('createTrustFence', () => {
     expect(fence.isTrusted(reqOf({ host: '127.0.0.1:3080', origin: 'http://attacker.example' }))).toBe(false)
     // The opaque origin "null" (sandboxed iframe / file:) is refused.
     expect(fence.isTrusted(reqOf({ host: '127.0.0.1:3080', origin: 'null' }))).toBe(false)
+  })
+})
+
+/**
+ * The two inputs DSH 0.2.1-alpha.2 added to the official fence — the listener's
+ * own bind address, and the protocol that decides default-port normalization —
+ * plus the live read the panel route depends on. The bind address is admitted
+ * because a browser dialing that literal sends it as Host and the literal is no
+ * rebinding target; the Origin and cross-site checks still apply.
+ */
+describe('createTrustFence bind address and live inputs', () => {
+  it('admits the listener bind address on any port', () => {
+    const fence = createTrustFence(() => ({ trustedHosts: [], bindHost: '10.33.227.252' }))
+    expect(fence.isTrusted(reqOf({ host: '10.33.227.252:3290' }))).toBe(true)
+    expect(fence.isTrusted(reqOf({ host: '10.33.227.252' }))).toBe(true)
+    // Any other address still needs trustedHosts.
+    expect(fence.isTrusted(reqOf({ host: '10.33.227.253:3290' }))).toBe(false)
+  })
+
+  it('admits a zoned IPv6 bind literal and strips the zone', () => {
+    const fence = createTrustFence(() => ({ trustedHosts: [], bindHost: 'fe80::1%12' }))
+    expect(fence.isTrusted(reqOf({ host: '[fe80::1]:3290' }))).toBe(true)
+    expect(fence.isTrusted(reqOf({ host: '[fe80::2]:3290' }))).toBe(false)
+  })
+
+  it('never admits an unspecified bind address', () => {
+    // The pre-0.2.1-alpha.2 host line can still bind 0.0.0.0; "every interface"
+    // is not the single authority a browser dials, and that line's own sampled
+    // trustedHosts entries carry its reachability instead.
+    for (const bindHost of ['0.0.0.0', '::', '::ffff:0.0.0.0']) {
+      const fence = createTrustFence(() => ({ trustedHosts: [], bindHost }))
+      expect(fence.isTrusted(reqOf({ host: '0.0.0.0:3080' })), bindHost).toBe(false)
+      expect(fence.isTrusted(reqOf({ host: '[::]:3080' })), bindHost).toBe(false)
+      expect(fence.isTrusted(reqOf({ host: 'attacker.example' })), bindHost).toBe(false)
+    }
+  })
+
+  it('reads its inputs live, so a provider that publishes later takes effect', () => {
+    let inputs: TrustInputs = { trustedHosts: [] }
+    const fence = createTrustFence(() => inputs)
+    expect(fence.isTrusted(reqOf({ host: 'app.example:3080' }))).toBe(false)
+    inputs = { trustedHosts: ['app.example'], protocol: 'https:' }
+    expect(fence.isTrusted(reqOf({ host: 'app.example:3080' }))).toBe(true)
+  })
+
+  it('normalizes Host under the Origin scheme for the same-origin check', () => {
+    // An HTTPS listener behind the default port: https://127.0.0.1 omits :443,
+    // and the Host literal is re-parsed under the Origin's scheme to match.
+    const fence = createTrustFence(() => ({ trustedHosts: [], protocol: 'https:' }))
+    expect(fence.isTrusted(reqOf({ host: '127.0.0.1:443', origin: 'https://127.0.0.1' }))).toBe(true)
+    // The transport's own scheme decides the default port: :443 is explicit
+    // under http, so an http Origin on that authority is a different one.
+    expect(fence.isTrusted(reqOf({ host: '127.0.0.1:443', origin: 'http://127.0.0.1' }))).toBe(false)
   })
 })

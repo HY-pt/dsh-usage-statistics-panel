@@ -3,7 +3,8 @@
  * (range aggregate + backfill status), the durable usage store, and the
  * collector that folds live session events plus the one-time historical
  * session backfill. Every request passes the same browser-trust fence as the
- * /api gateway (Host-header loopback or the web runtime's trustedHosts).
+ * /api gateway (Host-header loopback, a trusted authority, or this listener's
+ * own bind address — see trust-fence.ts for which host line publishes which).
  *
  * The panel's data flow mirrors the reasonix usage stats feature: usage is
  * recorded observationally (never alters the event stream; a bad disk state
@@ -11,7 +12,8 @@
  * the browser half over the fenced route.
  */
 
-import type { Context } from './context-types.ts'
+import type { Context, UsageWebRuntime, UsageWebStartup } from './context-types.ts'
+import type { TrustInputs } from './trust-fence.ts'
 import { UsageStore } from './store.ts'
 import { UsageCollector } from './collector.ts'
 import { buildUsageRoute } from './routes.ts'
@@ -70,11 +72,31 @@ export function apply(ctx: Context, config: UsageStatsConfig = {}): void {
     backfillConcurrency: config.backfillConcurrency,
   })
 
-  // The trusted-host list comes from the web runtime (bound at boot); fall
-  // back to loopback-only when the runtime is absent (e.g. headless).
-  const trustedHosts = (): string[] => {
-    const rt = (ctx as unknown as { webRuntime?: { trustedHosts?: string[] } }).webRuntime
-    return rt?.trustedHosts ?? []
+  // The /usage/api trust inputs, resolved live so the fence reads the same sources
+  // the /api gateway derives them from. DSH 0.2.1-alpha.2 moved the explicit
+  // authorities onto the `webStartup` provider, deleted `webRuntime` (whose list
+  // also carried the LAN literals sampled at bind time), and began admitting the
+  // listener's own bind address independently of that list; both host lines stay
+  // served by reading the two providers in turn and always publishing the bind
+  // address the request arrived on.
+  //
+  // webRuntime comes first because on the lines that publish it, it is the list
+  // the official fence is wired to: its `web-runtime` row samples the LAN
+  // literals at bind time and appends the invocation's authorities, making it a
+  // superset of `webStartup.trustedHosts` (the CLI flags alone).
+  //
+  // Both providers are probed with ctx.get(): cordis' traced Context throws on a
+  // direct property read of a service the host does not register, and this runs
+  // inside the route handler's fence call, where a throw escapes to the
+  // webserver's bare 400 instead of a fence decision.
+  const trust = (): TrustInputs => {
+    const runtime = ctx.get('webRuntime') as UsageWebRuntime | undefined
+    const startup = ctx.get('webStartup') as UsageWebStartup | undefined
+    return {
+      trustedHosts: runtime?.trustedHosts ?? startup?.trustedHosts ?? [],
+      bindHost: ctx.webServer.host,
+      protocol: ctx.webServer.protocol ?? 'http:',
+    }
   }
 
   // One abortable scan at a time: the initial boot backfill and any /reset
@@ -132,7 +154,7 @@ export function apply(ctx: Context, config: UsageStatsConfig = {}): void {
 
   // Mount the fenced route. The disposer runs on fiber teardown (HMR-safe).
   ctx.effect(() => {
-    const route = buildUsageRoute(ctx, { store, collector, trustedHosts, isRebuilding, resetAndRescan })
+    const route = buildUsageRoute(ctx, { store, collector, trust, isRebuilding, resetAndRescan })
     const dispose = ctx.webServer.register(route as never)
     return dispose
   }, 'dsh-usage-statistics-panel: routes')

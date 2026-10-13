@@ -175,7 +175,7 @@ describe('POST /usage/api/reset', () => {
         reset: async () => { calls.resets++ },
       },
       collector: { running: false, status: { running: false, done: 0, total: 0 } },
-      trustedHosts: () => [] as string[],
+      trust: () => ({ trustedHosts: [] }),
       isRebuilding: () => false,
       // The host-half coalescing pipeline stands in directly: the route owns
       // the 409 fence, the pipeline owns wipe + rebuild.
@@ -262,7 +262,7 @@ describe('route path matching', () => {
     const base = {
       store: { reset: async () => {} },
       collector: { running: false, status: { running: false, done: 0, total: 0 } },
-      trustedHosts: () => [] as string[],
+      trust: () => ({ trustedHosts: [] }),
       isRebuilding: () => false,
       resetAndRescan: async () => {},
     } as unknown as Parameters<typeof buildUsageRoute>[1]
@@ -297,6 +297,33 @@ describe('route path matching', () => {
     const res = mockRes()
     await handler(req('/usage/api/status', 'GET'), res)
     expect(res.jsonStatus).toBe(404)
+  })
+
+  it('admits the listener bind address and refuses every other stranger host', async () => {
+    // The route reads all three trust inputs live; this is the deployment shape
+    // DSH 0.2.1-alpha.2 introduced (one concrete bind address, no wildcard): the
+    // browser dials the bind literal, which the official fence admits too.
+    const base = {
+      store: { reset: async () => {} },
+      collector: { running: false, status: { running: false, done: 0, total: 0 } },
+      trust: () => ({ trustedHosts: [], bindHost: '10.0.0.7' }),
+      isRebuilding: () => false,
+      resetAndRescan: async () => {},
+    } as unknown as Parameters<typeof buildUsageRoute>[1]
+    const { handler } = buildUsageRoute({} as never, base)
+    const untrusted = mockRes()
+    await handler(
+      { url: '/usage/api/status', method: 'POST', headers: { host: 'stranger.example:8090' } } as unknown as UsageHttpRequest,
+      untrusted,
+    )
+    expect(untrusted.jsonStatus).toBe(403)
+    expect(JSON.parse(untrusted.bodyText).error.code).toBe('forbidden')
+    const bound = mockRes()
+    await handler(
+      { url: '/usage/api/status', method: 'POST', headers: { host: '10.0.0.7:8090' } } as unknown as UsageHttpRequest,
+      bound,
+    )
+    expect(bound.jsonStatus).toBe(200)
   })
 
   it('echos only the request path (not query params) in the 404 body', async () => {

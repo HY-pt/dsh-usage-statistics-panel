@@ -13,6 +13,10 @@ function fakeCtx(openImpl: () => Promise<unknown> ): { ctx: unknown; opens: () =
   let opens = 0
   const ctx = {
     effect: (_fn: unknown, _label?: string) => {},
+    // The trust providers (webStartup / webRuntime) are probed through ctx.get,
+    // which answers undefined for a service this host does not register — the
+    // same shape a headless composition presents.
+    get: () => undefined,
     webServer: { register: (_route: unknown) => () => {} },
     sessionPersistence: { list: async () => [], inspect: async () => ({ meta: {}, events: [] }) },
     sessions: { list: () => [], get: () => undefined },
@@ -113,6 +117,8 @@ describe('/reset rebuild pipeline (host half)', () => {
     const ctx = {
       effect: (fn: () => () => void) => { fn() },
       on: () => {},
+      // See the other fake ctx: the trust providers are ctx.get probes.
+      get: () => undefined,
       webServer: {
         register: (route: never) => {
           routes.push(route as unknown as CapturedRoute)

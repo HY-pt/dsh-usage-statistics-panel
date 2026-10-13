@@ -52,6 +52,37 @@ export interface UsageWebRoute {
 /** The webserver service (mirror of @deepseek-ai/dsh-host-webserver). */
 export interface UsageWebServer {
   register(route: UsageWebRoute): () => void
+  /** The listener's configured bind address. Present on every host line, but its
+   *  type moved with 0.2.1-alpha.2: through alpha.1 it is the config union
+   *  `'127.0.0.1' | '0.0.0.0'`, and from alpha.2 a concrete IPv4/IPv6 literal
+   *  (that line rejects the unspecified address when its config loads). */
+  host?: string
+  /** The protocol the listener speaks (`'https:'` when TLS is configured).
+   *  Published from 0.2.1-alpha.2; callers treat absence as plain HTTP. */
+  protocol?: 'http:' | 'https:'
+}
+
+/** The web app's start-up values (mirror of @deepseek-ai/dsh-web-app's
+ *  `WebStartupValues`, narrowed to the trust list). This provider is where
+ *  0.2.1-alpha.2 onwards publishes the invocation's explicit `--trusted-host`
+ *  authorities.
+ *
+ *  Deliberately NOT merged into the Context augmentation: cordis' traced
+ *  Context throws on a direct property read of a service the host does not
+ *  register, so these are probed through `ctx.get()` instead (a throw escaping
+ *  the route handler would surface as the webserver's bare 400). */
+export interface UsageWebStartup {
+  trustedHosts: string[]
+}
+
+/** The web runtime service the pre-0.2.1-alpha.2 lines publish: its
+ *  `trustedHosts` is the list the official fence is wired to there — the LAN
+ *  IPv4 literals sampled at bind time followed by the invocation's authorities,
+ *  i.e. a superset of {@link UsageWebStartup.trustedHosts}. Removed upstream in
+ *  0.2.1-alpha.2 ("Support concrete Web listener bind addresses"), which is why
+ *  the fence reads it first and falls back to the start-up values. */
+export interface UsageWebRuntime {
+  trustedHosts?: string[]
 }
 
 /** A session header row (mirror of @deepseek-ai/dsh-session-persistence). */

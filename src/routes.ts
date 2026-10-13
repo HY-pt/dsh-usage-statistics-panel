@@ -6,7 +6,8 @@
  *   - reset  {} -> drop every row + cursor, then rescan all persisted
  *              sessions (the store-rebuild escape hatch)
  * The prefix route /usage/api is registered on the webserver; each request
- * passes the browser-trust fence (Host-header loopback or trustedHosts).
+ * passes the browser-trust fence (Host-header loopback, a trusted authority, or
+ * this listener's own bind address).
  */
 
 import type { Context } from './context-types.ts'
@@ -17,13 +18,14 @@ import { aggregateSamples } from './query.ts'
 import type { UsageSample } from './query.ts'
 import type { BackfillStatus, UsageStatsRange, UsageStatsRequest } from './wire.ts'
 import { UsageError, readJsonBody, writeError, writeJson } from './wire.ts'
-import { createTrustFence, type TrustFence } from './trust-fence.ts'
+import { createTrustFence, type TrustFence, type TrustInputs } from './trust-fence.ts'
 
 export interface RoutesDeps {
   store: UsageStore
   collector: UsageCollector
-  /** Resolve the trusted-host list live (webRuntime.trustedHosts). */
-  trustedHosts: () => string[]
+  /** Resolve the /usage/api trust inputs live: the trusted authorities, this
+   *  listener's bind address, and its protocol (see trust-fence TrustInputs). */
+  trust: () => TrustInputs
   /** Whether a /reset rebuild pipeline is currently in flight (its scan
    *  makes the collector report running too — callers use this to tell that
    *  benign state apart from a boot scan and COALESCE onto the pipeline
@@ -135,7 +137,7 @@ export async function aggregateRange(store: UsageStore, from: string, to: string
  *  The host mounts it via `ctx.webServer.register` (which takes ONE WebRoute,
  *  not an array — matching the real dsh-host-webserver contract). */
 export function buildUsageRoute(ctx: Context, deps: RoutesDeps): UsageWebRoute {
-  const fence: TrustFence = createTrustFence(deps.trustedHosts)
+  const fence: TrustFence = createTrustFence(deps.trust)
   const handler = async (req: UsageHttpRequest, res: UsageHttpResponse): Promise<void> => {
     if (!fence.isTrusted(req)) {
       writeJson(res, { ok: false, error: { code: 'forbidden', message: 'untrusted host' } }, 403)

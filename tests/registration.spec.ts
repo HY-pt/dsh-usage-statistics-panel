@@ -6,6 +6,10 @@
  * ctx records every registration, so a future edit that silently re-adds a
  * Settings section, or moves the entry back into the shared footer row, fails
  * here instead of in the browser.
+ *
+ * The composer-dock takeover is host-line dependent (see the dock block), so
+ * the fake also carries the dock's entry ledger: what a host REGISTERED is
+ * what decides which ids this build shadows.
  */
 // @vitest-environment jsdom
 import { readFileSync } from 'node:fs'
@@ -14,8 +18,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apply, BUNDLE_NAME, PANEL_ID } from '../src/client/index.tsx'
 import type { Context, UsageSlotEntrySpec } from '../src/context-types.ts'
 
-function fakeCtx(): { ctx: Context; recorded: UsageSlotEntrySpec[] } {
+/** The dock ledger both host lines are faked through: the split host shows the
+ *  official activity/usage pair, the pre-split host the single stats entry. */
+const SPLIT_DOCK = ['activity', 'usage']
+const PRE_SPLIT_DOCK = ['stats']
+
+function fakeCtx(dockIds: string[] = SPLIT_DOCK): {
+  ctx: Context
+  recorded: UsageSlotEntrySpec[]
+  /** Publish a new dock ledger, notifying the injected subscription. */
+  publishDock: (ids: string[]) => void
+} {
   const recorded: UsageSlotEntrySpec[] = []
+  const dockListeners = new Set<() => void>()
+  let ledger = [...dockIds]
   const ctx = {
     effect: (fn: () => void | (() => void)) => { fn() },
     locale: {
@@ -27,6 +43,15 @@ function fakeCtx(): { ctx: Context; recorded: UsageSlotEntrySpec[] } {
       // declares every slot immediately, which is the steady state.
       inject: (_name: string, callback: () => void | (() => void)) => { callback() },
       register: (spec: UsageSlotEntrySpec) => { recorded.push(spec); return () => {} },
+      // Only the dock is probed; every other key reports an empty ledger.
+      entries: (name: string) => (name === 'conversation.composer.dock'
+        ? ledger.map((id) => ({ options: { id } }))
+        : []),
+      subscribe: (name: string, listener: () => void) => {
+        if (name !== 'conversation.composer.dock') return () => {}
+        dockListeners.add(listener)
+        return () => { dockListeners.delete(listener) }
+      },
     },
     // The back control's history source; this spec is about the registration
     // surface, so the panel never moves here.
@@ -38,7 +63,19 @@ function fakeCtx(): { ctx: Context; recorded: UsageSlotEntrySpec[] } {
       selectPanel: () => {},
     },
   } as unknown as Context
-  return { ctx, recorded }
+  return {
+    ctx,
+    recorded,
+    publishDock: (ids: string[]) => {
+      ledger = [...ids]
+      for (const listener of [...dockListeners]) listener()
+    },
+  }
+}
+
+/** The ids of every composer-dock registration, in registration order. */
+function dockIds(recorded: UsageSlotEntrySpec[]): Array<string | undefined> {
+  return recorded.filter((r) => r.name === 'conversation.composer.dock').map((r) => r.id)
 }
 
 afterEach(() => { vi.unstubAllGlobals() })
@@ -105,5 +142,67 @@ describe('client registration surface', () => {
     const { ctx, recorded } = fakeCtx()
     apply(ctx)
     expect(recorded.some((r) => r.name === 'conversation.composer.dock')).toBe(true)
+  })
+})
+
+/**
+ * The dock takeover must shadow whichever ids the host actually publishes:
+ * DSH 0.2.1-alpha.1 split the single `stats` entry into `activity` + `usage`
+ * (official release notes: plugins replacing the former `stats` row must
+ * update their registered IDs). Registering the wrong shape is the bug itself:
+ * a non-matching id does not shadow, it renders an extra entry beside the
+ * official row.
+ */
+describe('composer-dock takeover host contract', () => {
+  it('shadows the split activity and usage entries on DSH >= 0.2.1-alpha.1', () => {
+    const { ctx, recorded } = fakeCtx(SPLIT_DOCK)
+    apply(ctx)
+    const dock = recorded.filter((r) => r.name === 'conversation.composer.dock')
+    expect(dock.map((r) => r.id)).toEqual(['activity', 'usage'])
+    // Below the official priority 0 (lowest live entry renders => shadows) and
+    // in the official display order.
+    expect(dock.map((r) => r.priority)).toEqual([-1, -1])
+    expect(dock.map((r) => r.order)).toEqual([0, 1])
+    expect(dock.map((r) => r.locale)).toEqual(['usageStats', 'usageStats'])
+  })
+
+  it('shadows the single stats entry on the pre-split host', () => {
+    const { ctx, recorded } = fakeCtx(PRE_SPLIT_DOCK)
+    apply(ctx)
+    expect(dockIds(recorded)).toEqual(['stats'])
+    expect(recorded.find((r) => r.name === 'conversation.composer.dock')!.priority).toBe(-1)
+  })
+
+  it('never registers both shapes at once', () => {
+    // Either id set on the wrong host renders extra pills instead of shadowing,
+    // so the two shapes must stay mutually exclusive.
+    for (const ledger of [SPLIT_DOCK, PRE_SPLIT_DOCK]) {
+      const { ctx, recorded } = fakeCtx(ledger)
+      apply(ctx)
+      const ids = dockIds(recorded)
+      expect(ids.includes('stats') && (ids.includes('activity') || ids.includes('usage'))).toBe(false)
+    }
+  })
+
+  it('waits for the official entries instead of guessing when the ledger is still empty', () => {
+    // ui-chat may register after this plugin; the takeover must then follow the
+    // first shape the dock publishes rather than defaulting to either contract.
+    const { ctx, recorded, publishDock } = fakeCtx([])
+    apply(ctx)
+    expect(dockIds(recorded)).toEqual([])
+    publishDock(PRE_SPLIT_DOCK)
+    expect(dockIds(recorded)).toEqual(['stats'])
+  })
+
+  it('decides once: a later ledger change cannot add the other shape', () => {
+    const { ctx, recorded, publishDock } = fakeCtx([])
+    apply(ctx)
+    publishDock(SPLIT_DOCK)
+    expect(dockIds(recorded)).toEqual(['activity', 'usage'])
+    // Our own registrations mutate the same ledger; a re-decision would stack
+    // the pre-split row on top of the split pair.
+    publishDock([...SPLIT_DOCK, 'stats'])
+    publishDock(SPLIT_DOCK)
+    expect(dockIds(recorded)).toEqual(['activity', 'usage'])
   })
 })

@@ -188,7 +188,16 @@ export interface UsagePluginConfigOwnerProps {
   readonly view: 'summary' | 'page'
 }
 
-/** The client slot registry service (mirror of the client store/ui-slots). */
+/** One stored registration as the ledger exposes it (only the cell id is read
+ *  here; the render-erased entry carries the whole options bag upstream). */
+export interface UsageSlotEntry {
+  options: { id?: string }
+}
+
+/** The client slot registry service (mirror of the client store/ui-slots).
+ *  `entries`/`subscribe` are the inspection surface the composer-dock takeover
+ *  reads to tell which host contract it is shadowing; both are present on
+ *  every host line this plugin supports (verified 0.1.5-rc.2 .. 0.2.1-alpha.2). */
 export interface UsageSlotsService {
   /** Wait for (or run against) the named slot's declaration. The callback
    *  returns one disposer or an iterable of disposers (a generator yield
@@ -198,6 +207,11 @@ export interface UsageSlotsService {
     callback: () => void | (() => void) | Iterable<() => void>,
   ): void
   register(spec: UsageSlotEntrySpec, component: unknown): () => void
+  /** Snapshot the registered entries of one slot key. */
+  entries(name: string): readonly UsageSlotEntry[]
+  /** Subscribe to one slot key's registration changes (microtask-batched);
+   *  returns the unsubscribe handle. */
+  subscribe(name: string, listener: () => void): () => void
 }
 
 /** The client-side locale service (mirror of @deepseek-ai/dsh-client-locale). */

@@ -57,6 +57,11 @@ function fakeCtx(initialPanel: string | null = null): {
     slots: {
       inject: (_name: string, callback: () => void | (() => void)) => { callback() },
       register: (spec: UsageSlotEntrySpec) => { specs.push(spec); return () => {} },
+      // No composer-dock ledger in this spec: the bottom-bar takeover stays
+      // undecided and registers nothing. What this spec records is the panel
+      // navigation surface.
+      entries: () => [],
+      subscribe: () => () => {},
     },
     layout: {
       panelInfo: {

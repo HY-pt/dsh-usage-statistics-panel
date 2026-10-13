@@ -1,12 +1,27 @@
 /**
- * StatsLineEnhanced - the shadowing entry for `conversation.composer.dock`
- * (id 'stats', priority -1): replicates the official ui-chat StatsPills
- * (DSH 0.1.5-alpha.1) - a gauge pill (turn/step counts + output speed,
- * click opens the time-and-speed dialog) and a database pill (total tokens
- * + cache hit, click opens the token-usage dialog). The official package is
- * not a client-bundle external, so its internals cannot be imported; the
- * replicated pure folds live in stats-line-core (same derivation, covered by
- * the core tests) and the dialog seat in stat-dialog.ts.
+ * The composer-dock takeover: replicates the official ui-chat StatsPills - a
+ * gauge pill (turn/step counts + output speed, click opens the time-and-speed
+ * dialog) and a database pill (total tokens + cache hit, click opens the
+ * token-usage dialog). The official package is not a client-bundle external,
+ * so its internals cannot be imported; the replicated pure folds live in
+ * stats-line-core (same derivation, covered by the core tests) and the dialog
+ * seat in stat-dialog.ts.
+ *
+ * ONE published build serves BOTH dock contracts, because the host line
+ * decides how many entries the row is:
+ *  - DSH <= 0.2.0-rc.2 exposes a single `stats` entry, so the whole row is
+ *    one registration: `StatsLineEnhanced` (id 'stats', priority -1) renders
+ *    the root container the two pills live in and owns their shared exclusive
+ *    dialog slot;
+ *  - DSH >= 0.2.1-alpha.1 split that entry into `activity` (counts/speed/time)
+ *    and `usage` (tokens/cache), so each pill is its own registration at its
+ *    own id: `StatsActivityEntry` and `StatsUsageEntry`. There is no row
+ *    element any more - the host's `.dock` flex row lays the entries out, and
+ *    the anchors carry the tier `.root` used to own (`css.dockAnchor`) - and
+ *    each pill owns its dialog state, with mutual exclusion coming from
+ *    stat-dialog's capture-phase outside click.
+ * Which pair to register is read from the dock's entry ledger in
+ * src/client/index.tsx.
  *
  * Two plugin-side readouts ride the same pills: with precise cache hit rate
  * on, the hit figure renders two decimals; with the session token breakdown
@@ -75,6 +90,13 @@ type T = StatsLineEnhancedProps['t']
 
 /** External open state one pill's dialog reads and writes (the row's exclusive slot). */
 type PillDialog = Pick<StatDialogSeat, 'open' | 'setOpen'>
+
+/** The anchor's class list. The pre-split row sets the text tier on `.root`
+ *  and the anchor inherits it; a split-mode entry IS a child of the host's
+ *  `.dock`, so its anchor declares the tier itself (the official `.anchor`). */
+function anchorClass(dock: boolean): string | undefined {
+  return dock ? `${css.anchor} ${css.dockAnchor}` : css.anchor
+}
 
 /** The separator + figure shape both speed arms render into the gauge pill.
  *  The figure sits in a width-reserved slot (css.speed): the live reading
@@ -221,15 +243,19 @@ function LiveSpeed({ useChat, scale, fallback, t }: {
     : t('stats.tokensPerSecond', { throughput: formatTokensPerSecond(reading) })} />
 }
 
-function TimePill({ stats, t, dialog, useChat, scale, liveSpeed }: {
+function TimePill({ stats, t, dialog, useChat, scale, liveSpeed, dock }: {
   stats: WindowStats
   t: T
-  dialog: PillDialog
+  /** The row's shared exclusive slot; omitted by a split-mode entry, which
+   *  owns its own state (exclusion then rides stat-dialog's outside click). */
+  dialog?: PillDialog
   useChat: ChatSnapshotSelectorHook
   /** Correction measured from this session's settled steps (1 = raw prior). */
   scale: number
   /** Whether the streaming-throughput preference is on. */
   liveSpeed: boolean
+  /** Whether the host's own dock row owns the layout (DSH >= 0.2.1-alpha.1). */
+  dock: boolean
 }) {
   const { open, setOpen, rootRef, panelRef, pos } = useStatDialog(dialog)
   const counts = t('stats.counts', { turns: stats.turns, steps: stats.steps })
@@ -253,7 +279,7 @@ function TimePill({ stats, t, dialog, useChat, scale, liveSpeed }: {
   // stays a plain reading instead of a button opening an empty dialog.
   if (stats.llmMs <= 0 && stats.toolMs <= 0 && stats.ttftSteps <= 0 && stats.decodeMs <= 0) {
     return (
-      <span className={css.anchor}>
+      <span className={anchorClass(dock)}>
         <span className={css.pill}>
           <IconGaugeOutlineRegular />
           {label}
@@ -262,7 +288,7 @@ function TimePill({ stats, t, dialog, useChat, scale, liveSpeed }: {
     )
   }
   return (
-    <span ref={rootRef} className={css.anchor}>
+    <span ref={rootRef} className={anchorClass(dock)}>
       <button
         type="button"
         className={css.pill}
@@ -325,12 +351,15 @@ function TimePill({ stats, t, dialog, useChat, scale, liveSpeed }: {
   )
 }
 
-function UsagePill({ usage, t, dialog, cachePrecision, tokenDetail }: {
+function UsagePill({ usage, t, dialog, cachePrecision, tokenDetail, dock }: {
   usage: Parameters<typeof billedInputTokens>[0]
   t: T
-  dialog: PillDialog
+  /** The row's shared exclusive slot; omitted by a split-mode entry. */
+  dialog?: PillDialog
   cachePrecision: boolean
   tokenDetail: boolean
+  /** Whether the host's own dock row owns the layout (DSH >= 0.2.1-alpha.1). */
+  dock: boolean
 }) {
   const { open, setOpen, rootRef, panelRef, pos } = useStatDialog(dialog)
   // Same aggregate as the official pill total: every prompt-side billing bucket plus output.
@@ -341,7 +370,7 @@ function UsagePill({ usage, t, dialog, cachePrecision, tokenDetail }: {
   const exactCount = (value: number): string =>
     t('message.turnUsage.count', { count: formatTokens(value) })
   return (
-    <span ref={rootRef} className={css.anchor}>
+    <span ref={rootRef} className={anchorClass(dock)}>
       <button
         type="button"
         className={css.pill}
@@ -407,6 +436,12 @@ function UsagePill({ usage, t, dialog, cachePrecision, tokenDetail }: {
   )
 }
 
+/**
+ * The pre-split whole-row entry: DSH <= 0.2.0-rc.2 exposes ONE
+ * `conversation.composer.dock` entry (id 'stats'), so this component owns the
+ * row container, the host-container marker, and the two pills' shared
+ * exclusive dialog slot. On 0.2.1-alpha.1+ the two entries below replace it.
+ */
 export const StatsLineEnhanced = memo(function StatsLineEnhanced(
   { useChat, useProjection, t }: StatsLineEnhancedProps,
 ) {
@@ -453,6 +488,7 @@ export const StatsLineEnhanced = memo(function StatsLineEnhanced(
           useChat={useChat}
           scale={tokenScale}
           liveSpeed={streamThroughput}
+          dock={false}
           dialog={{
             open: openPill === 'time',
             setOpen: (open) => { setOpenPill(open ? 'time' : null) },
@@ -469,8 +505,67 @@ export const StatsLineEnhanced = memo(function StatsLineEnhanced(
           }}
           cachePrecision={cachePrecision}
           tokenDetail={tokenDetail}
+          dock={false}
         />
       )}
     </div>
+  )
+})
+
+/**
+ * The split-mode `activity` dock entry (DSH >= 0.2.1-alpha.1): the gauge pill
+ * alone, at the official entry's id so priority -1 shadows it. The host's
+ * `.dock` flex row owns the layout the pre-split row used to build, and the
+ * `usage` entry mounts as an independent sibling — so this component reads
+ * only what its own pill needs, and its dialog state is its own (the seat's
+ * outside click closes it when the sibling opens).
+ *
+ * The empty check is per entry, exactly as the official pill's: the counts
+ * pill is gated on settled steps.
+ */
+export const StatsActivityEntry = memo(function StatsActivityEntry(
+  { useChat, useProjection, t }: StatsLineEnhancedProps,
+) {
+  const settledNodes = useChat(s => s.legacy.nodes)
+  const projected = useProjection('sessionStats')
+  const stats = useMemo(() => projected ?? deriveStats(settledNodes ?? []), [projected, settledNodes])
+  const [streamThroughput, setStreamThroughput] = useState(statsLineState.streamThroughput)
+  useEffect(() => statsLineState.subscribe(() => {
+    setStreamThroughput(statsLineState.streamThroughput)
+  }), [])
+  const tokenScale = useMemo(() => measuredTokenScale(settledNodes ?? []) ?? 1, [settledNodes])
+  if (stats.steps === 0) return null
+  return (
+    <TimePill stats={stats} t={t} useChat={useChat} scale={tokenScale} liveSpeed={streamThroughput} dock />
+  )
+})
+
+/**
+ * The split-mode `usage` dock entry (DSH >= 0.2.1-alpha.1): the database pill
+ * alone, at the official entry's id so priority -1 shadows it. Gated on actual
+ * token activity, as the official pill is and as the pre-split row's own
+ * `hasTokens` did.
+ */
+export const StatsUsageEntry = memo(function StatsUsageEntry(
+  { useProjection, t }: StatsLineEnhancedProps,
+) {
+  const usage = useProjection('tokenUsage')
+  const [cachePrecision, setCachePrecision] = useState(statsLineState.cachePrecision)
+  const [tokenDetail, setTokenDetail] = useState(statsLineState.tokenDetail)
+  useEffect(() => statsLineState.subscribe(() => {
+    setCachePrecision(statsLineState.cachePrecision)
+    setTokenDetail(statsLineState.tokenDetail)
+  }), [])
+  const hasTokens = usage !== undefined
+    && (billedInputTokens(usage) > 0 || usage.outputTokens > 0)
+  if (!hasTokens) return null
+  return (
+    <UsagePill
+      usage={usage}
+      t={t}
+      cachePrecision={cachePrecision}
+      tokenDetail={tokenDetail}
+      dock
+    />
   )
 })

@@ -60,7 +60,8 @@ Token 桶语义：`inputTokens` 是 uncached input（即缓存 miss 侧），`ca
 
 - `POST /usage/api/range`：`{ range, from?, to? }` → `UsageStatsRange`；custom 范围做语义日期校验（拒绝 `2026-13-45` 这类正则可过但日历不存在的形状）并限制跨度 ≤366 天（400）
 - `POST /usage/api/status`：`BackfillStatus`
-- 信任围栏与 `/api` 网关同源同语义（dsh-client-connection `isTrustedApiRequest`）：① Host 头须为 loopback 或 webRuntime.trustedHosts 授权（无端口条目匹配任意端口，带端口条目精确匹配 host:port）；② `sec-fetch-site: cross-site` 一律拒绝；③ 携带 Origin 时必须与 Host 同源（"null" 视为不透明 origin 拒绝）。任一不满足即 403。
+- 信任围栏与 `/api` 网关同源同语义（dsh-client-connection `isTrustedApiRequest`）：① Host 头须为 loopback、本监听端自身的 bind 地址（`webServer.host`，任意端口，剥 `%zone`；未指定地址拼写一律不认），或 trust 列表中的授权（无端口条目匹配任意端口，带端口条目精确匹配 host:port）；② `sec-fetch-site: cross-site` 一律拒绝；③ 携带 Origin 时必须与 Host 同源（"null" 视为不透明 origin 拒绝；Host 放到 Origin 的 scheme 下再归一）。任一不满足即 403。
+- trust 列表与协议按宿主代际取源。`0.2.1-alpha.2` 起：`webStartup.trustedHosts`（仅 CLI 显式授权）+ `webServer.protocol`；该版还删除了 `webRuntime` 服务，并把「接受 bind 地址」独立出来。此前：`webRuntime.trustedHosts` 才是官方 fence 实际接入的那一份（`web-runtime` 行在绑定后采样局域网字面量并接上调用参数，是 `webStartup` 的超集），故这里 **webRuntime 优先、webStartup 兜底**。两个 provider 都用 `ctx.get()` 探测：直接读一个宿主未注册的服务属性会被 cordis 的 traced Context 抛错，而该抛错发生在 handler 的围栏调用里，会逃出 handler 被 webserver 兜底成空 400（本 issue 的现象）。
 
 ## Client 半
 

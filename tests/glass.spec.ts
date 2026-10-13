@@ -38,6 +38,11 @@ function fakeCtx(): { ctx: Context; disposers: Array<() => void> } {
     slots: {
       inject: (_name: string, callback: () => void | (() => void)) => { callback() },
       register: () => () => {},
+      // This spec declares no composer-dock ledger, so the bottom-bar takeover
+      // stays undecided and registers nothing (the contract choice itself is
+      // covered by registration.spec.ts); nothing here observes that slot.
+      entries: () => [],
+      subscribe: () => () => {},
     },
     // `apply` also reads the layout service for the panel's back control; no
     // panel moves in this spec, so a stationary stub is enough.

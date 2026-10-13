@@ -46,6 +46,17 @@
   min-width: 0;
 }
 
+/* Split-mode anchor (DSH >= 0.2.1-alpha.1). The host split the single `stats`
+   dock entry into one entry per pill and let its own `.dock` flex row own the
+   layout, so the anchor IS the entry root and carries the text tier `.root`
+   used to set — the official StatsPills.module.css moved exactly this pair of
+   declarations from `.root` onto `.anchor`. The tier stays off the plain
+   `.anchor` because the pre-split row must keep its own `.root` tier. */
+.dockAnchor {
+  font-size: calc(var(--dsh-content-font-size-secondary, 13px) - 1px);
+  line-height: calc(20px + var(--dsh-content-font-delta-secondary, 0px));
+}
+
 .pill {
   display: inline-flex;
   align-items: center;

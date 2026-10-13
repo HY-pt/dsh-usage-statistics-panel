@@ -86,7 +86,9 @@ Token 桶语义：`inputTokens` 是 uncached input（即缓存 miss 侧），`ca
 
 ### StatsLineEnhanced.tsx — 底部信息栏接管
 
-以 id `stats`、`priority: -1` 注册进 `conversation.composer.dock`（list 槽，最低优先级条目渲染），遮蔽官方 StatsPills 并叠加两个读数开关。该行跨宿主代际有两套容器契约：`0.1.6-alpha.1` 及以前，槽位直接渲染进 InputBar 自己的列，行自持内容宽度（`--dsh-chat-content-width`）、左右 `clearance + 16px` 侧边距与 4px 顶距；`0.1.6-alpha.2` 起，槽位被放进与常驻 ContextMeter 并排的 flex 行 `.dock`，居中、12px 间距、顶距与侧边距由该容器负责，行只需在其中收缩。组件在 DOM 挂载时读父容器的计算样式并打 `data-dock-row` 标记，样式表按标记在两套声明间切换——一份构建同时满足两条宿主线。
+以 `priority: -1` 注册进 `conversation.composer.dock`（list 槽，最低优先级条目渲染），遮蔽官方 StatsPills 并叠加两个读数开关。**注册的 id 由宿主代际决定，注册前从该槽自己的条目账本读出**（`ctx.slots.entries`）：`0.2.1-alpha.1` 起官方把单个 `stats` 拆成 `activity`（轮/步与速度、用时浮层）与 `usage`（token 与命中率、用量浮层）两个独立条目（其 release notes 明言「覆盖旧 `stats` 整行的插件需要更新注册 ID」），所以那时注册两条同 id 条目；此前仍是单 `stats`，注册整行一条。id 不匹配不会遮蔽，只会多渲染一个条目——猜错任一方向都是 issue #10 那类重复行，故账本为空（ui-chat 晚于本插件注册）时**保持未决**，由 `ctx.slots.subscribe` 在首个发布出形状的变更上定夺，而不是默认成某一边。两条宿主线上的组件分工：单 `stats` 线上 `StatsLineEnhanced` 自持行容器与两个浮层共享的互斥态；拆分线上 `StatsActivityEntry` / `StatsUsageEntry` 各自只渲染裸 `.anchor`（无行容器，交给宿主 `.dock` 的 flex 行）、各自持空判据、各自持浮层开态，互斥改由 stat-dialog 在 document 捕获阶段关闭兄弟实现。
+
+该行跨宿主代际有两套容器契约：`0.1.6-alpha.1` 及以前，槽位直接渲染进 InputBar 自己的列，行自持内容宽度（`--dsh-chat-content-width`）、左右 `clearance + 16px` 侧边距与 4px 顶距；`0.1.6-alpha.2` 起，槽位被放进与常驻 ContextMeter 并排的 flex 行 `.dock`，居中、12px 间距、顶距与侧边距由该容器负责，行只需在其中收缩。组件在 DOM 挂载时读父容器的计算样式并打 `data-dock-row` 标记，样式表按标记在两套声明间切换——一份构建同时满足两条宿主线。文字档位同理分两处：整行线上由 `.root` 声明、`.anchor` 继承；拆分线上没有行容器可继承（官方同一提交把这组声明从 `.root` 移到了每个条目的 `.anchor`），故拆分条目的锚点自带 `.dockAnchor` 档位。
 
 ### 样式
 

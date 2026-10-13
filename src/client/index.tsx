@@ -33,7 +33,7 @@ import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import { ArrowLeft } from 'lucide-react'
 import { UsageStatsPanel } from './UsageStatsPanel.tsx'
 import { StatsIcon } from './stats-icon.tsx'
-import { StatsLineEnhanced } from './StatsLineEnhanced.tsx'
+import { StatsActivityEntry, StatsLineEnhanced, StatsUsageEntry } from './StatsLineEnhanced.tsx'
 import { LOCALE_NS, en, zh, zhTW, type UsageStatsKey } from './locales.ts'
 import { isCompatibleGlass, whenGlassReady } from './glass.ts'
 import css from './UsageStatsPanel.module.css'
@@ -110,6 +110,41 @@ export function UsageStatsPanelPage(props: UsageStatsPanelPageProps): JSX.Elemen
  *  selected state around it. */
 export function StatsPanelIcon({ size }: PropsRuntime<'sidebar.panellist'>): JSX.Element {
   return <StatsIcon size={size} />
+}
+
+/** The composer dock slot the bottom-bar takeover shadows. */
+const COMPOSER_DOCK = 'conversation.composer.dock'
+
+/** The pre-split takeover: ONE entry at the official 'stats' id, rendering the
+ *  whole row (DSH <= 0.2.0-rc.2). */
+function installStatsRowEntry(ctx: Context): () => void {
+  return ctx.slots.register({
+    name: COMPOSER_DOCK,
+    id: 'stats',
+    order: 0,
+    priority: -1,
+    locale: LOCALE_NS,
+  }, StatsLineEnhanced)
+}
+
+/** The split takeover: one entry per official pill, each shadowed at its own
+ *  id (DSH >= 0.2.1-alpha.1). */
+function installSplitDockEntries(ctx: Context): () => void {
+  const offActivity = ctx.slots.register({
+    name: COMPOSER_DOCK,
+    id: 'activity',
+    order: 0,
+    priority: -1,
+    locale: LOCALE_NS,
+  }, StatsActivityEntry)
+  const offUsage = ctx.slots.register({
+    name: COMPOSER_DOCK,
+    id: 'usage',
+    order: 1,
+    priority: -1,
+    locale: LOCALE_NS,
+  }, StatsUsageEntry)
+  return () => { offUsage(); offActivity() }
 }
 
 export function apply(ctx: Context): void {
@@ -221,15 +256,51 @@ export function apply(ctx: Context): void {
     locale: LOCALE_NS,
   }, StatsPanelIcon))
 
-  // The bottom-bar takeover: shadow the official StatsPills entry (same id
-  // 'stats', lower priority — the slot's lowest live entry renders) so the
-  // pills match the official ones while both toggles are off and gain the
-  // two readouts when they are on. Disposal restores the official entry.
-  ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
-    name: 'conversation.composer.dock',
-    id: 'stats',
-    order: 0,
-    priority: -1,
-    locale: LOCALE_NS,
-  }, StatsLineEnhanced))
+  // The bottom-bar takeover: shadow the official stats pills (same id, lower
+  // priority — the slot's lowest live entry renders) so the pills match the
+  // official ones while every toggle is off and gain this plugin's readouts
+  // when they are on. Disposal restores the official entries.
+  //
+  // WHICH ids to shadow depends on the host line: DSH 0.2.1-alpha.1 split the
+  // single 'stats' entry into 'activity' (counts/speed/time) and 'usage'
+  // (tokens/cache hit) — its release notes say so outright ("输入区统计扩展拆为
+  // activity 和 usage 两个独立入口；覆盖旧 stats 整行的插件需要更新注册 ID").
+  // Registering the wrong shape is worse than registering nothing: 'stats' on a
+  // split host matches no cell, so it renders as a THIRD entry beside the
+  // official two (the duplicated row of issue #10), and the split ids on a
+  // pre-split host also match no cell, adding two pills beside the official
+  // row. So the shape is READ from the dock's own entry ledger instead of
+  // assumed — the same runtime-probe convention the row already applies to its
+  // container.
+  //
+  // A host whose ui-chat registers after this plugin shows an empty ledger at
+  // inject time. That case stays UNDECIDED rather than guessed (either guess is
+  // the wrong contract for the other line) and the subscription resolves it on
+  // the first change that publishes either shape; a dock that never publishes
+  // one keeps no takeover, which is the harmless direction.
+  ctx.slots.inject(COMPOSER_DOCK, () => {
+    const dockIds = (): Set<string> => new Set(
+      ctx.slots.entries(COMPOSER_DOCK)
+        .map((entry) => entry.options.id)
+        .filter((id): id is string => id !== undefined),
+    )
+    let decided = false
+    let installed: (() => void) | null = null
+    const decide = (): void => {
+      if (decided) return
+      const ids = dockIds()
+      const split = ids.has('activity') || ids.has('usage')
+      if (!split && !ids.has('stats')) return
+      // Latched BEFORE registering: a host whose subscription fires
+      // synchronously must not re-enter the decision through our own mutation.
+      decided = true
+      installed = split ? installSplitDockEntries(ctx) : installStatsRowEntry(ctx)
+    }
+    const unsubscribe = ctx.slots.subscribe(COMPOSER_DOCK, decide)
+    decide()
+    return () => {
+      unsubscribe()
+      installed?.()
+    }
+  })
 }

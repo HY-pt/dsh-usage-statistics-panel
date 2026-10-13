@@ -11,13 +11,15 @@
  * exclusive open slot.
  */
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useSyncExternalStore } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import type {
   AssistantMessageNodeLike, ToolResultNodeLike,
 } from '../src/client/stats-line-core.ts'
-import { StatsLineEnhanced, type StatsLineEnhancedProps } from '../src/client/StatsLineEnhanced.tsx'
+import { StatsActivityEntry, StatsLineEnhanced, StatsUsageEntry, type StatsLineEnhancedProps } from '../src/client/StatsLineEnhanced.tsx'
 import { zh } from '../src/client/locales.ts'
 import { resetStatsLineStateForTests, statsLineState } from '../src/client/stats-line-state.ts'
 
@@ -685,6 +687,126 @@ describe('StatsLineEnhanced host container contract', () => {
       </div>,
     )
     expect(rowOf(view).hasAttribute('data-dock-row')).toBe(false)
+  })
+})
+
+/**
+ * The split dock contract (DSH >= 0.2.1-alpha.1): the host turned the single
+ * 'stats' entry into one entry per pill, so each pill is now its own component
+ * with its own empty check and its own dialog state. The pre-split row's shared
+ * `openPill` slot is unreachable across two independent entries, so mutual
+ * exclusion rides stat-dialog's capture-phase outside click instead.
+ *
+ * The two components here are what src/client/index.tsx registers at the
+ * official ids ('activity' / 'usage', priority -1); the host renders them as
+ * siblings inside its own `.dock` flex row.
+ */
+describe('split dock entries', () => {
+  /** The anchor a split entry renders as its root. */
+  const anchorOf = (view: ReturnType<typeof render>): HTMLElement => {
+    const anchor = view.container.firstElementChild
+    expect(anchor).not.toBeNull()
+    return anchor as HTMLElement
+  }
+
+  it('renders the activity pill as a bare entry: no pre-split row container', () => {
+    const { source } = makeSource([assistant(1, 1), tool()])
+    const view = render(<StatsActivityEntry {...props(source)} />)
+    // The host's `.dock` owns the row now, so the plugin must not draw one.
+    expect(view.container.querySelector('[data-composer-stats]')).toBeNull()
+    expect(view.container.querySelector('[data-dock-row]')).toBeNull()
+    expect(anchorOf(view).tagName).toBe('SPAN')
+    expect(screen.getByText('1 轮 · 1 步')).toBeTruthy()
+  })
+
+  it('carries the dock text tier on the split anchor, not a row tier', () => {
+    const { source } = makeSource([assistant(1, 1)])
+    const view = render(<StatsActivityEntry {...props(source)} />)
+    // `.root` used to set the tier for the whole row; a split entry is a child
+    // of the host's dock row instead, so its anchor declares the tier itself.
+    expect(anchorOf(view).className).toContain('dockAnchor')
+    expect(render(<StatsLineEnhanced {...props(source)} />).container
+      .querySelector('[data-composer-stats]')!.className).not.toContain('dockAnchor')
+  })
+
+  it('renders the usage pill as a bare entry too', () => {
+    const { source } = makeSource([assistant(1, 1)])
+    const view = render(<StatsUsageEntry {...props(source)} />)
+    expect(view.container.querySelector('[data-composer-stats]')).toBeNull()
+    expect(anchorOf(view).className).toContain('dockAnchor')
+    expect(screen.getByRole('button', { name: '105 tok · 缓存命中 90%' })).toBeTruthy()
+  })
+
+  it('hides the activity entry with no settled step, whatever the token usage', () => {
+    const { source } = makeSource()
+    const view = render(<StatsActivityEntry {...props(source, { tokenUsage: USAGE })} />)
+    expect(view.container.textContent).toBe('')
+  })
+
+  it('hides the usage entry when no step billed anything', () => {
+    const { source } = makeSource()
+    const view = render(<StatsUsageEntry {...props(source, {
+      tokenUsage: { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    })} />)
+    expect(view.container.textContent).toBe('')
+  })
+
+  it('hides the usage entry when no projection is composed', () => {
+    const { source } = makeSource([assistant(1, 1)])
+    const view = render(<StatsUsageEntry {...props(source, {})} />)
+    expect(view.container.textContent).toBe('')
+  })
+
+  it('keeps the two entries mutually exclusive through the outside click', () => {
+    const { source } = makeSource()
+    const values = {
+      tokenUsage: USAGE,
+      sessionStats: sessionStats({ turns: 1, steps: 1, llmMs: 1100 }),
+    }
+    // The host lays the two entries out as siblings in its own flex dock row.
+    render(
+      <div style={{ display: 'flex', flexDirection: 'row' }}>
+        <StatsActivityEntry {...props(source, values)} />
+        <StatsUsageEntry {...props(source, values)} />
+      </div>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: '1 轮 · 1 步' }))
+    expect(screen.getAllByRole('dialog')).toHaveLength(1)
+    expect(screen.getByRole('dialog').textContent).toContain('用时与速度')
+    // Each pill owns its own open state now, so the incumbent is closed by the
+    // capture-phase click rather than by a shared slot.
+    fireEvent.click(screen.getByRole('button', { name: '105 tok · 缓存命中 90%' }))
+    expect(screen.getAllByRole('dialog')).toHaveLength(1)
+    const dialog = screen.getByRole('dialog')
+    expect(dialog.textContent).toContain('Token 用量')
+    expect(dialog.textContent).not.toContain('用时与速度')
+  })
+
+  it('keeps each split entry on its own toggles', () => {
+    statsLineState.setStreamThroughput(true)
+    statsLineState.setCachePrecision(true)
+    const { source } = makeSource([assistant(1, 1)], { turn: 1, step: 1, blocks: [] })
+    render(<StatsUsageEntry {...props(source, { tokenUsage: { uncachedInputTokens: 59, outputTokens: 5, cacheReadTokens: 341, cacheWriteTokens: 0 } })} />)
+    // cachePrecision belongs to the usage entry: the precise rate shows there.
+    expect(screen.getByRole('button', { name: '405 tok · 缓存命中 85.25%' })).toBeTruthy()
+  })
+})
+
+/**
+ * The dock tier is a stylesheet contract: the host moved the row's text tier
+ * from its `.root` onto each entry's `.anchor`, and a split entry has no row of
+ * its own to inherit from. One parsed rule pins it against that drift.
+ */
+describe('split dock anchor tier', () => {
+  it('declares the official secondary-minus-one tier on .dockAnchor', () => {
+    const sheet = readFileSync(
+      join(process.cwd(), 'src', 'client', 'StatsLineEnhanced.module.css'),
+      'utf8',
+    )
+    const dockAnchor = sheet.match(/\.dockAnchor\s*\{([^}]*)\}/)
+    expect(dockAnchor).not.toBeNull()
+    expect(dockAnchor![1]).toContain('font-size: calc(var(--dsh-content-font-size-secondary, 13px) - 1px)')
+    expect(dockAnchor![1]).toContain('line-height: calc(20px + var(--dsh-content-font-delta-secondary, 0px))')
   })
 })
 
